@@ -23,6 +23,7 @@ CONF_EXCLUDE = "exclude"
 CONF_HOME_INTERVAL = "home_interval"
 CONF_IFACE = "iface"
 CONF_PING_TIMEOUT = "ping_timeout"
+CONF_PING_INCOMPLETE = "ping_incomplete"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -30,6 +31,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_HOSTS, default=[]): vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(CONF_EXCLUDE, default=[]): vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(CONF_PING_TIMEOUT, default=2.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=5)),
+        vol.Optional(CONF_PING_INCOMPLETE, default=False): cv.boolean,
         vol.Optional(CONF_IFACE, default=''): cv.string,
     }
 )
@@ -71,6 +73,26 @@ def ip_mask_match(ip, mask):
 
     return True
 
+def parse_arp_a_line(line):
+    r = r'([a-zA-Z0-9_.-]+|\?) \((([0-9]+\.){3}[0-9]+)\) at (([0-9A-Fa-f]{2}\:){5}[0-9A-Fa-f]{2}|<[a-z]+>) .*'
+    m = re.match(r, line)
+    if not m:
+        return None, None, None
+
+    if m[1] == '?':
+        hostname = None
+    else:
+        hostname = m[1]
+
+    ipv4 = m[2]
+
+    if m[4][0] == '<':
+        mac = None
+    else:
+        mac = m[4]
+
+    return hostname, ipv4, mac
+
 class ArpDeviceScanner(DeviceScanner):
     """This class scans for devices using arp+ping."""
 
@@ -84,6 +106,7 @@ class ArpDeviceScanner(DeviceScanner):
         self.exclude = config[CONF_EXCLUDE]
         minutes = config[CONF_HOME_INTERVAL]
         self._ping_timeout = config[CONF_PING_TIMEOUT]
+        self._ping_incomplete = config[CONF_PING_INCOMPLETE]
         self._iface = config[CONF_IFACE]
         self.home_interval = timedelta(minutes=minutes)
 
@@ -122,8 +145,9 @@ class ArpDeviceScanner(DeviceScanner):
 
         last_results = []
         last_macs = []
+        now = dt_util.now()
         if self.home_interval:
-            boundary = dt_util.now() - self.home_interval
+            boundary = now - self.home_interval
             for device in self.last_results:
                 if device.last_update > boundary:
                     last_results.append(device)
@@ -140,24 +164,16 @@ class ArpDeviceScanner(DeviceScanner):
             _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
             return False
 
-        now = dt_util.now()
         for line in out.decode('utf-8').splitlines():
             # Format is: <hostname>|? (<ip>) at <mac> [<iftype>] on <iface>
-            # The hostname is optional for us.  If we can't parse the IP or the
-            # MAC the result is useless to us though so skip it.
-            r = r'([a-zA-Z0-9_.-]+|\?) \((([0-9]+\.){3}[0-9]+)\) at (([0-9A-Fa-f]{2}\:){5}[0-9A-Fa-f]{2}) .*'
-            m = re.match(r, line)
-            if not m:
+            # The hostname is optional for us.  If we can't parse the IP the
+            # entry is not useful to us.  If we can't parse the mac, it may
+            # not have been cached yet so we'll still attempt a ping.
+            hostname, ipv4, mac = parse_arp_a_line(line)
+
+            if ipv4 is None or mac in last_macs:
                 continue
-
-            if m[1] == '?':
-                hostname = None
-            else:
-                hostname = m[1]
-            ipv4 = m[2]
-            mac = m[4]
-
-            if mac in last_macs:
+            if mac is None and not self._ping_incomplete:
                 continue
 
             for mask in self.hosts:
@@ -185,7 +201,27 @@ class ArpDeviceScanner(DeviceScanner):
                 if pinger.returncode != 0:
                     continue
             except:
+                _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
                 continue
+
+            # If we had no mac for this device, but it replied to the ping,
+            # the ARP table will now have the mac cached.
+            if mac is None:
+                cmd = [ 'arp', '-a' ]
+                if self._iface:
+                    cmd += [ '-i', self._iface ]
+                cmd += [ ipv4 ]
+                _LOGGER.debug('Running ' + ' '.join(cmd) + '...')
+                try:
+                    arp = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+                    out, _ = arp.communicate()
+                except Exception as e:
+                    _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
+                    continue
+
+                hostname, new_ip, mac = parse_arp_a_line(line)
+                if new_ip != ipv4 or mac in last_macs or mac is None:
+                    continue
 
             last_results.append(Device(mac.upper(), hostname, ipv4, now))
 
