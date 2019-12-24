@@ -24,6 +24,7 @@ CONF_HOME_INTERVAL = "home_interval"
 CONF_IFACE = "iface"
 CONF_PING_TIMEOUT = "ping_timeout"
 CONF_PING_INCOMPLETE = "ping_incomplete"
+CONF_FPING_INTERVAL = "fping_interval"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -33,6 +34,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_PING_TIMEOUT, default=2.0): vol.All(vol.Coerce(float), vol.Range(min=0, max=5)),
         vol.Optional(CONF_PING_INCOMPLETE, default=False): cv.boolean,
         vol.Optional(CONF_IFACE, default=''): cv.string,
+        vol.Required(CONF_FPING_INTERVAL, default=0): cv.positive_int,
     }
 )
 
@@ -101,6 +103,7 @@ class ArpDeviceScanner(DeviceScanner):
     def __init__(self, config):
         """Initialize the scanner."""
         self.last_results = []
+        self.fping_time = None
 
         self.hosts = config[CONF_HOSTS]
         self.exclude = config[CONF_EXCLUDE]
@@ -109,6 +112,7 @@ class ArpDeviceScanner(DeviceScanner):
         self._ping_incomplete = config[CONF_PING_INCOMPLETE]
         self._iface = config[CONF_IFACE]
         self.home_interval = timedelta(minutes=minutes)
+        self.fping_interval = timedelta(seconds=config[CONF_FPING_INTERVAL])
 
         _LOGGER.debug("Scanner initialized")
 
@@ -153,13 +157,31 @@ class ArpDeviceScanner(DeviceScanner):
                     last_results.append(device)
                     last_macs.append(device.mac)
 
+        if self.fping_interval and (self.fping_time is None or now > self.fping_time + self.fping_interval):
+            ip_masks = []
+            single_ips = []
+            for mask in self.hosts:
+                if '/' in mask:
+                    ip_masks.append([ '-g', mask ])
+                elif re.match(r'([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)', mask):
+                    single_ips.append(mask)
+            if len(single_ips):
+                ip_masks.append(single_ips)
+            for mask in ip_masks:
+                cmd = [ 'fping', '-q', '-r', '0', '-t', str(int(self._ping_timeout * 1000)) ] + mask
+                _LOGGER.debug('Running ' + ' '.join(cmd) + '...')
+                try:
+                    subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
+                except Exception as e:
+                    _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
+            self.fping_time = now
+
         cmd = [ 'arp', '-a' ]
         if self._iface:
             cmd += [ '-i', self._iface ]
         _LOGGER.debug('Running ' + ' '.join(cmd) + '...')
         try:
-            arp = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-            out, _ = arp.communicate() 
+            out, _ = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
         except Exception as e:
             _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
             return False
@@ -213,8 +235,7 @@ class ArpDeviceScanner(DeviceScanner):
                 cmd += [ ipv4 ]
                 _LOGGER.debug('Running ' + ' '.join(cmd) + '...')
                 try:
-                    arp = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-                    out, _ = arp.communicate()
+                    out, _ = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
                 except Exception as e:
                     _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
                     continue
