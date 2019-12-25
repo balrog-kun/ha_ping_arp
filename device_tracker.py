@@ -25,6 +25,7 @@ CONF_IFACE = "iface"
 CONF_PING_TIMEOUT = "ping_timeout"
 CONF_PING_INCOMPLETE = "ping_incomplete"
 CONF_FPING_INTERVAL = "fping_interval"
+CONF_TRY_ARPING = "try_arping"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -35,6 +36,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_PING_INCOMPLETE, default=False): cv.boolean,
         vol.Optional(CONF_IFACE, default=''): cv.string,
         vol.Required(CONF_FPING_INTERVAL, default=0): cv.positive_int,
+        vol.Optional(CONF_TRY_ARPING, default=False): cv.boolean,
     }
 )
 
@@ -113,6 +115,7 @@ class ArpDeviceScanner(DeviceScanner):
         self._iface = config[CONF_IFACE]
         self.home_interval = timedelta(minutes=minutes)
         self.fping_interval = timedelta(seconds=config[CONF_FPING_INTERVAL])
+        self.try_arping = timedelta(seconds=config[CONF_TRY_ARPING])
 
         _LOGGER.debug("Scanner initialized")
 
@@ -220,11 +223,26 @@ class ArpDeviceScanner(DeviceScanner):
             try:
                 pinger = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 pinger.communicate()
-                if pinger.returncode != 0:
-                    continue
-            except:
+            except Exception as e:
                 _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
                 continue
+
+            if pinger.returncode != 0:
+                if not self.try_arping:
+                    continue
+                # Some machines don't reply to normal pings, try ARP pinging (using nping)
+                cmd = [ 'nping', '-c', '1', '--arp' ]
+                if self._iface:
+                    cmd += [ '-I', self._iface ]
+                cmd += [ ipv4 ]
+                _LOGGER.debug('Running ' + ' '.join(cmd) + '...')
+                try:
+                    out, _ = subprocess.Popen(cmd, stdout=subprocess.PIPE).communicate()
+                except Exception as e:
+                    _LOGGER.error('Fail: ' + ' '.join(cmd) + ' resulted in ' + str(e))
+                    continue
+                if ipv4 + ' is at ' not in out.decode('utf-8'):
+                    continue
 
             # If we had no mac for this device, but it replied to the ping,
             # the ARP table will now have the mac cached.
