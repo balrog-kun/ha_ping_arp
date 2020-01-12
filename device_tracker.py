@@ -231,7 +231,7 @@ class ArpDeviceScanner(DeviceScanner):
                 if not self.try_arping:
                     continue
                 # Some machines don't reply to normal pings, try ARP pinging (using nping)
-                cmd = [ 'nping', '-c', '1', '--arp' ]
+                cmd = [ 'nping', '-c', '1', '--arp', '--privileged' ]
                 if self._iface:
                     cmd += [ '-I', self._iface ]
                 cmd += [ ipv4 ]
