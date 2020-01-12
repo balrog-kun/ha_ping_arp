@@ -78,7 +78,7 @@ def ip_mask_match(ip, mask):
     return True
 
 def parse_arp_a_line(line):
-    r = r'([a-zA-Z0-9_.-]+|\?) \((([0-9]+\.){3}[0-9]+)\) at (([0-9A-Fa-f]{2}\:){5}[0-9A-Fa-f]{2}|<[a-z]+>) .*'
+    r = r'([a-zA-Z0-9_.-]+|\?) \((([0-9]+\.){3}[0-9]+)\) [A-Za-z ]+ (([0-9A-Fa-f]{2}\:){5}[0-9A-Fa-f]{2}|<[a-z]+>) .*'
     m = re.match(r, line)
     if not m:
         return None, None, None
@@ -190,10 +190,18 @@ class ArpDeviceScanner(DeviceScanner):
             return False
 
         for line in out.decode('utf-8').splitlines():
-            # Format is: <hostname>|? (<ip>) at <mac> [<iftype>] on <iface>
+            # Format is: _(<hostname>|? (<ip>) at) <mac> [<iftype>] _(on <iface>)
             # The hostname is optional for us.  If we can't parse the IP the
             # entry is not useful to us.  If we can't parse the mac, it may
             # not have been cached yet so we'll still attempt a ping.
+            #
+            # Note the _() part means this part may be differently formatted
+            # based on the locale.  At least in German the "at" changes to
+            # "auf" but in theory the parentheses and the order of hostname/ip
+            # may be moved around too.  That's problematic but the only other
+            # available format (arp without -a) truncates strings to fit the
+            # columns so it's even less useful.  Thus we just assume the format
+            # is always gonna be <hostname>|? (<ip>) .* <mac>
             hostname, ipv4, mac = parse_arp_a_line(line)
 
             if ipv4 is None or mac in last_macs:
